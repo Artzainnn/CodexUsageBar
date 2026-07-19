@@ -102,7 +102,7 @@
     /* Navigation */
     nav {
       position: fixed;
-      top: 0;
+      top: 40px;
       left: 0;
       right: 0;
       z-index: 100;
@@ -189,7 +189,7 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: 80px 24px 80px;
+      padding: 120px 24px 80px;
       text-align: center;
     }
 
@@ -640,6 +640,28 @@
     .usage-status-dot.green  { background: #21c55d; }
     .usage-status-dot.orange { background: #ff8c42; }
     .usage-status-dot.red    { background: #ff3b30; }
+
+    .twin-card {
+      display: flex;
+      align-items: center;
+      text-align: left;
+      gap: 14px;
+      max-width: 480px;
+      margin: 44px auto 0;
+      padding: 14px 18px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      text-decoration: none;
+      transition: border-color 0.2s, transform 0.2s;
+    }
+    .twin-card:hover { border-color: #da7756; transform: translateY(-2px); }
+    .twin-card img { width: 42px; height: 42px; border-radius: 9px; flex-shrink: 0; }
+    .twin-card-title { font-size: 14.5px; font-weight: 600; color: var(--text-primary); }
+    .twin-card-desc { font-size: 12.5px; color: var(--text-secondary); }
+    .twin-card-arrow { margin-left: auto; color: var(--text-muted); font-size: 18px; transition: transform 0.2s, color 0.2s; }
+    .twin-card:hover .twin-card-arrow { transform: translateX(3px); color: #da7756; }
+    @media (max-width: 520px) { .twin-card { margin-left: 16px; margin-right: 16px; } }
 
     .usage-popup-footer {
       display: flex;
@@ -1114,11 +1136,35 @@
       window.datafast.q.push(arguments);
     };
   </script>
-  <!-- TODO: add DataFast loader for codexusagebar.com once the site is created in DataFast -->
+  <script
+    defer
+    data-website-id="dfid_QbISUJzko8aHfAIvHoZW6"
+    data-domain="codexusagebar.com"
+    src="https://datafa.st/js/script.js">
+  </script>
   <link rel="stylesheet" href="/nav-status.css">
   <script src="/nav-status.js" defer></script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "CodexUsageBar",
+    "operatingSystem": "macOS",
+    "applicationCategory": "DeveloperApplication",
+    "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
+    "description": "Free, open-source macOS menu bar app that tracks your ChatGPT Codex usage limits in real time.",
+    "url": "https://codexusagebar.com/",
+    "downloadUrl": "https://github.com/Artzainnn/CodexUsageBar/releases/latest/download/CodexUsageBar-Installer.dmg",
+    "author": {"@type": "Person", "name": "Maxime", "url": "https://x.com/buildingitmyway"}
+  }
+  </script>
 </head>
 <body style="background-color: #0d0d0f;">
+  <!-- Cross-promo banner -->
+  <a href="https://claudeusagebar.com?utm_source=codexusagebar&utm_medium=website&utm_campaign=cross_promo" target="_blank" class="announce-bar" data-fast-goal="cross_promo">
+    <span class="announce-bar-tag">ALSO</span>
+    Using Claude too? Get ClaudeUsageBar<span class="announce-bar-cta"> <span class="announce-bar-sep">&bull;</span> Free</span>
+  </a>
 
   <div class="ambient"></div>
 
@@ -1310,6 +1356,15 @@
       <div style="text-align: center; margin-top: 16px;">
         <a href="javascript:void(0)" onclick="refreshUsage()" style="color: var(--text-muted); font-size: 14px; text-decoration: none; cursor: pointer; transition: color 0.2s;" onmouseover="this.style.color='var(--codex-green)'" onmouseout="this.style.color='var(--text-muted)'">Click to see it in action</a>
       </div>
+
+      <a href="https://claudeusagebar.com?utm_source=codexusagebar&utm_medium=website&utm_campaign=cross_promo" target="_blank" class="twin-card" data-fast-goal="cross_promo">
+        <img src="https://claudeusagebar.com/apple-touch-icon.png" alt="ClaudeUsageBar logo">
+        <div>
+          <div class="twin-card-title">Using Claude too?</div>
+          <div class="twin-card-desc">Get ClaudeUsageBar for your Claude limits</div>
+        </div>
+        <span class="twin-card-arrow">&rarr;</span>
+      </a>
     </div>
   </section>
 
@@ -1433,15 +1488,6 @@
       <h2><svg style="width:24px;height:24px;vertical-align:-3px;margin-right:8px;" viewBox="0 0 24 24" fill="none" stroke="var(--codex-green)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>Like CodexUsageBar? Check out my other products!</h2>
     </div>
     <div class="products-grid">
-      <a href="https://claudeusagebar.com?utm_source=codexusagebar&utm_medium=website&utm_campaign=cross_promo" target="_blank" class="product-card">
-        <div class="product-icon">
-          <img src="https://claudeusagebar.com/apple-touch-icon.png" width="44" height="44" style="border-radius: 10px; display: block;" alt="ClaudeUsageBar logo">
-        </div>
-        <div class="product-info">
-          <span class="product-name">ClaudeUsageBar</span>
-          <span class="product-desc">Track your Claude usage from the menu bar</span>
-        </div>
-      </a>
       <a href="https://mediaboost.press?utm_source=codexusagebar&utm_medium=website&utm_campaign=cross_promo" target="_blank" class="product-card">
         <div class="product-icon">
           <svg width="44" height="44" viewBox="0 0 40 41" fill="none" xmlns="http://www.w3.org/2000/svg">
