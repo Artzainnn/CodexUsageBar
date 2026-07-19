@@ -1,0 +1,16 @@
+{
+  "version": "1.0.0",
+  "title": "Welcome to CodexUsageBar",
+  "description": "You're on the latest version.",
+  "buttons": [
+    {
+      "label": "Download",
+      "url": "https://github.com/Artzainnn/CodexUsageBar/releases/latest",
+      "style": "primary"
+    },
+    {
+      "label": "Later",
+      "action": "dismiss"
+    }
+  ]
+}

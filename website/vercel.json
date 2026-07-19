@@ -1,0 +1,26 @@
+{
+  "redirects": [
+    {
+      "source": "/(.*)",
+      "has": [
+        {
+          "type": "host",
+          "value": "chatgptusagebar.com"
+        }
+      ],
+      "destination": "https://codexusagebar.com/$1",
+      "permanent": true
+    },
+    {
+      "source": "/(.*)",
+      "has": [
+        {
+          "type": "host",
+          "value": "www.chatgptusagebar.com"
+        }
+      ],
+      "destination": "https://codexusagebar.com/$1",
+      "permanent": true
+    }
+  ]
+}

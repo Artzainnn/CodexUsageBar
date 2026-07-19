@@ -1,0 +1,2002 @@
+import SwiftUI
+import AppKit
+import WebKit
+import Carbon
+import ServiceManagement
+
+// Main entry point
+class AppDelegate: NSObject, NSApplicationDelegate {
+    var statusItem: NSStatusItem!
+    var popover: NSPopover!
+    var usageManager: UsageManager!
+    var statusManager: StatusManager!
+    var updateManager: UpdateManager!
+    var eventMonitor: Any?
+    var hotKeyRef: EventHotKeyRef?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // The UI is designed for dark; force dark appearance regardless of the
+        // system light/dark setting (light mode had poor contrast).
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+
+        // NSUserNotification (deprecated but works without permissions for unsigned apps)
+        NSLog("✅ App launched, notifications ready")
+
+        // Create status bar item with variable length for compact display
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+
+        if let button = statusItem.button {
+            // Create initial menu bar icon
+            updateStatusIcon(percentage: 0)
+            button.action = #selector(handleClick)
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            button.target = self
+
+            // Force the button to be visible
+            button.appearsDisabled = false
+            button.isEnabled = true
+        }
+
+        // Initialize managers
+        usageManager = UsageManager(statusItem: statusItem, delegate: self)
+        statusManager = StatusManager()
+        updateManager = UpdateManager()
+
+        // Create popover
+        popover = NSPopover()
+        // Initial guess; SwiftUI's intrinsic size (capped at 600) will drive the actual size.
+        popover.contentSize = NSSize(width: 360, height: 320)
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(rootView: UsageView(
+            usageManager: usageManager,
+            statusManager: statusManager,
+            updateManager: updateManager
+        ))
+
+        // Fetch initial data
+        usageManager.fetchUsage()
+        statusManager.fetch()
+        updateManager.fetch()
+
+        // Usage + Anthropic status are time-sensitive — poll every 5 min.
+        Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
+            self.usageManager.fetchUsage()
+            self.statusManager.fetch()
+        }
+
+        // App updates are infrequent (new release at most weekly) — poll every 3 hours.
+        Timer.scheduledTimer(withTimeInterval: 3 * 3600, repeats: true) { _ in
+            self.updateManager.fetch()
+        }
+
+        // Set up Cmd+U keyboard shortcut
+        setupKeyboardShortcut()
+    }
+
+    func setupKeyboardShortcut() {
+        // Check Accessibility permissions
+        checkAccessibilityPermissions()
+
+        // Only register if user has the shortcut enabled
+        if usageManager.shortcutEnabled {
+            registerGlobalHotKey()
+        }
+    }
+
+    func setShortcutEnabled(_ enabled: Bool) {
+        if enabled {
+            registerGlobalHotKey()
+        } else {
+            unregisterGlobalHotKey()
+        }
+    }
+
+    func checkAccessibilityPermissions() {
+        // Check if app has Accessibility permissions
+        let trusted = AXIsProcessTrusted()
+
+        if !trusted {
+            NSLog("⚠️ Accessibility permissions not granted")
+            // Show alert to guide user
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                let alert = NSAlert()
+                alert.messageText = "Accessibility Permission Required"
+                alert.informativeText = "CodexUsageBar needs Accessibility permission to use the Cmd+U keyboard shortcut.\n\nPlease enable it in:\nSystem Settings → Privacy & Security → Accessibility"
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "Open System Settings")
+                alert.addButton(withTitle: "Skip for Now")
+
+                let response = alert.runModal()
+                if response == .alertFirstButtonReturn {
+                    // Open System Settings
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+                }
+            }
+        } else {
+            NSLog("✅ Accessibility permissions granted")
+        }
+    }
+
+    func registerGlobalHotKey() {
+        // Guard against double registration
+        if hotKeyRef != nil { return }
+
+        var hotKeyID = EventHotKeyID()
+        // Use simple numeric ID instead of FourCharCode
+        hotKeyID.signature = 0x436C5542 // 'ClUB' as hex
+        hotKeyID.id = 1
+
+        // Cmd+U key code
+        let keyCode: UInt32 = 32 // 'U' key
+        let modifiers: UInt32 = UInt32(cmdKey)
+
+        // Create event spec for hotkey
+        var eventType = EventTypeSpec()
+        eventType.eventClass = OSType(kEventClassKeyboard)
+        eventType.eventKind = OSType(kEventHotKeyPressed)
+
+        // Install event handler
+        var handler: EventHandlerRef?
+        let callback: EventHandlerUPP = { (nextHandler, event, userData) -> OSStatus in
+            // Get the AppDelegate instance
+            let appDelegate = Unmanaged<AppDelegate>.fromOpaque(userData!).takeUnretainedValue()
+
+            // Toggle popover
+            DispatchQueue.main.async {
+                appDelegate.togglePopover()
+            }
+
+            return noErr
+        }
+
+        // Install the handler
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        InstallEventHandler(GetApplicationEventTarget(), callback, 1, &eventType, selfPtr, &handler)
+
+        // Register the hotkey
+        let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+
+        if status == noErr {
+            NSLog("✅ Registered Cmd+U hotkey successfully")
+        } else {
+            NSLog("❌ Failed to register hotkey, status: \(status)")
+        }
+    }
+
+    func unregisterGlobalHotKey() {
+        if let hotKey = hotKeyRef {
+            UnregisterEventHotKey(hotKey)
+            hotKeyRef = nil
+            NSLog("🗑️ Unregistered Cmd+U hotkey")
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        unregisterGlobalHotKey()
+    }
+
+    @objc func quitApp() {
+        NSApplication.shared.terminate(nil)
+    }
+
+    @objc func togglePopover() {
+        if popover.isShown {
+            closePopover()
+        } else {
+            openPopover()
+        }
+    }
+
+    @objc func handleClick() {
+        guard let event = NSApp.currentEvent else { return }
+
+        if event.type == .rightMouseUp {
+            // Right click - show menu
+            let menu = NSMenu()
+            let toggleItem = NSMenuItem(title: "Toggle Usage (⌘U)", action: #selector(togglePopover), keyEquivalent: "u")
+            toggleItem.keyEquivalentModifierMask = .command
+            menu.addItem(toggleItem)
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(NSMenuItem(title: "Quit CodexUsageBar", action: #selector(quitApp), keyEquivalent: "q"))
+            statusItem.menu = menu
+            statusItem.button?.performClick(nil)
+            statusItem.menu = nil
+        } else {
+            // Left click - toggle popover
+            togglePopover()
+        }
+    }
+
+    func openPopover() {
+        if let button = statusItem.button {
+            // Force UI refresh by updating percentages
+            DispatchQueue.main.async {
+                self.usageManager.updatePercentages()
+            }
+
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+
+            // Add event monitor to detect clicks outside the popover
+            eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+                if self?.popover.isShown == true {
+                    self?.closePopover()
+                }
+            }
+        }
+    }
+
+    func closePopover() {
+        popover.performClose(nil)
+
+        // Remove event monitor
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
+    }
+
+    func updateStatusIcon(percentage: Int) {
+        guard let button = statusItem.button else { return }
+
+        // Determine color based on percentage
+        let color: NSColor
+        if percentage < 70 {
+            color = NSColor(red: 0.13, green: 0.77, blue: 0.37, alpha: 1.0) // Green
+        } else if percentage < 90 {
+            color = NSColor(red: 1.0, green: 0.8, blue: 0.0, alpha: 1.0) // Yellow
+        } else {
+            color = NSColor(red: 1.0, green: 0.23, blue: 0.19, alpha: 1.0) // Red
+        }
+
+        // Create spark icon with color
+        let sparkIcon = createSparkIcon(color: color)
+
+        // Set image and title
+        button.image = sparkIcon
+        button.title = " \(percentage)%"
+    }
+
+    func createSparkIcon(color: NSColor) -> NSImage {
+        let size = NSSize(width: 16, height: 16)
+        let image = NSImage(size: size)
+
+        image.lockFocus()
+
+        // Terminal-style chevron ">" — the CodexUsageBar mark.
+        let path = NSBezierPath()
+        path.lineWidth = 2.6
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        path.move(to: NSPoint(x: 4.5, y: 12.5))
+        path.line(to: NSPoint(x: 10.5, y: 8))
+        path.line(to: NSPoint(x: 4.5, y: 3.5))
+
+        color.setStroke()
+        path.stroke()
+
+        image.unlockFocus()
+        image.isTemplate = false
+
+        return image
+    }
+}
+
+// NSColor extension for hex conversion
+extension NSColor {
+    var hexString: String {
+        guard let rgbColor = self.usingColorSpace(.deviceRGB) else {
+            return "#000000"
+        }
+        let r = Int(rgbColor.redComponent * 255)
+        let g = Int(rgbColor.greenComponent * 255)
+        let b = Int(rgbColor.blueComponent * 255)
+        return String(format: "#%02X%02X%02X", r, g, b)
+    }
+}
+
+// Main entry point
+@main
+struct Main {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.setActivationPolicy(.accessory)
+        app.run()
+    }
+}
+
+struct AdditionalLimit: Equatable, Identifiable {
+    var id: String { name }
+    let name: String        // e.g. "GPT-5.3-Codex-Spark"
+    let percent: Int
+    let label: String       // window label, e.g. "Weekly (7 day)"
+    let resetsAt: Date?
+}
+
+class UsageManager: ObservableObject {
+    // Primary rate-limit window (5h session on Plus/Pro; weekly on some plans —
+    // the label is derived from the window duration the API reports).
+    @Published var sessionUsage: Int = 0
+    @Published var sessionLimit: Int = 100
+    @Published var sessionLabel: String = "Session"
+    @Published var sessionResetsAt: Date?
+    // Secondary window (typically the weekly limit); absent on some plans.
+    @Published var hasWeekly: Bool = false
+    @Published var weeklyUsage: Int = 0
+    @Published var weeklyLimit: Int = 100
+    @Published var weeklyLabel: String = "Weekly (7 day)"
+    @Published var weeklyResetsAt: Date?
+    // Per-model metered limits (shown when used).
+    @Published var additionalLimits: [AdditionalLimit] = []
+    // Codex credits (pay-as-you-go once limits are reached).
+    @Published var hasCredits: Bool = false
+    @Published var creditsBalance: Int = 0
+    @Published var creditsUnlimited: Bool = false
+    @Published var resetCreditsAvailable: Int = 0
+    @Published var planType: String = ""
+    @Published var lastUpdated: Date = Date()
+    @Published var isLoading: Bool = false
+    @Published var errorMessage: String?
+    @Published var usageNotificationsEnabled: Bool = true
+    @Published var statusNotificationsEnabled: Bool = true
+    @Published var openAtLogin: Bool = false
+    @Published var hasFetchedData: Bool = false
+    @Published var isAccessibilityEnabled: Bool = false
+    @Published var shortcutEnabled: Bool = true
+
+    private var statusItem: NSStatusItem?
+    private weak var delegate: AppDelegate?
+    private var lastNotifiedThreshold: Int = 0
+
+    init(statusItem: NSStatusItem?, delegate: AppDelegate? = nil) {
+        self.statusItem = statusItem
+        self.delegate = delegate
+        loadSettings()
+        checkAccessibilityStatus()
+    }
+
+    func checkAccessibilityStatus() {
+        isAccessibilityEnabled = AXIsProcessTrusted()
+    }
+
+    func loadSettings() {
+        // Migrate from legacy single notifications_enabled flag (pre-v1.1) to split flags
+        let hasUsageKey  = UserDefaults.standard.object(forKey: "usage_notifications_enabled")  != nil
+        let hasStatusKey = UserDefaults.standard.object(forKey: "status_notifications_enabled") != nil
+
+        if !hasUsageKey || !hasStatusKey {
+            let legacyHasKey = UserDefaults.standard.object(forKey: "notifications_enabled") != nil
+            let legacyValue  = legacyHasKey ? UserDefaults.standard.bool(forKey: "notifications_enabled") : true
+            if !hasUsageKey {
+                usageNotificationsEnabled = legacyValue
+                UserDefaults.standard.set(legacyValue, forKey: "usage_notifications_enabled")
+            }
+            if !hasStatusKey {
+                statusNotificationsEnabled = legacyValue
+                UserDefaults.standard.set(legacyValue, forKey: "status_notifications_enabled")
+            }
+        }
+        if hasUsageKey {
+            usageNotificationsEnabled = UserDefaults.standard.bool(forKey: "usage_notifications_enabled")
+        }
+        if hasStatusKey {
+            statusNotificationsEnabled = UserDefaults.standard.bool(forKey: "status_notifications_enabled")
+        }
+
+        // Reflect the real system login-item state, not just a stored bool.
+        if #available(macOS 13.0, *) {
+            openAtLogin = (SMAppService.mainApp.status == .enabled)
+        } else {
+            openAtLogin = UserDefaults.standard.bool(forKey: "open_at_login")
+        }
+        lastNotifiedThreshold = UserDefaults.standard.integer(forKey: "last_notified_threshold")
+        // Default shortcut to enabled if not previously set
+        if UserDefaults.standard.object(forKey: "shortcut_enabled") == nil {
+            shortcutEnabled = true
+        } else {
+            shortcutEnabled = UserDefaults.standard.bool(forKey: "shortcut_enabled")
+        }
+    }
+
+    func saveSettings() {
+        UserDefaults.standard.set(usageNotificationsEnabled,  forKey: "usage_notifications_enabled")
+        UserDefaults.standard.set(statusNotificationsEnabled, forKey: "status_notifications_enabled")
+        UserDefaults.standard.set(openAtLogin, forKey: "open_at_login")
+        UserDefaults.standard.set(shortcutEnabled, forKey: "shortcut_enabled")
+        UserDefaults.standard.synchronize()
+    }
+
+    // Actually register/unregister the app as a macOS login item.
+    func applyLoginItem(_ enabled: Bool) {
+        guard #available(macOS 13.0, *) else { return }
+        do {
+            if enabled {
+                if SMAppService.mainApp.status != .enabled {
+                    try SMAppService.mainApp.register()
+                }
+            } else {
+                if SMAppService.mainApp.status == .enabled {
+                    try SMAppService.mainApp.unregister()
+                }
+            }
+            NSLog("🔑 Login item \(enabled ? "registered" : "unregistered")")
+        } catch {
+            NSLog("❌ Login item error: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Codex auth (tokens written by `codex login` in ~/.codex/auth.json)
+
+    static let codexAuthPath = ("~/.codex/auth.json" as NSString).expandingTildeInPath
+    private static let oauthClientId = "app_EMoamEEZ73f0CkXaXp7hrann"
+    private var codexAccessToken: String = ""
+    private var codexRefreshToken: String = ""
+
+    var hasCodexAuth: Bool { FileManager.default.fileExists(atPath: Self.codexAuthPath) }
+
+    /// Loads the Codex CLI's OAuth tokens. Returns false when not signed in.
+    @discardableResult
+    func loadCodexAuth() -> Bool {
+        guard let data = FileManager.default.contents(atPath: Self.codexAuthPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tokens = json["tokens"] as? [String: Any],
+              let access = tokens["access_token"] as? String, !access.isEmpty else {
+            return false
+        }
+        codexAccessToken = access
+        codexRefreshToken = (tokens["refresh_token"] as? String) ?? ""
+        return true
+    }
+
+    func fetchUsage() {
+        guard loadCodexAuth() else {
+            DispatchQueue.main.async {
+                self.errorMessage = "Not signed in — run `codex login` in Terminal"
+                self.isLoading = false
+                self.updateStatusBar()
+            }
+            return
+        }
+        isLoading = true
+        errorMessage = nil
+        performUsageFetch(allowRefresh: true)
+    }
+
+    private func usageRequest() -> URLRequest {
+        var request = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/usage")!)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(codexAccessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        return request
+    }
+
+    private func performUsageFetch(allowRefresh: Bool) {
+        NSLog("🔍 Fetching Codex usage")
+        URLSession.shared.dataTask(with: usageRequest()) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isLoading = false
+
+                if let error = error {
+                    NSLog("❌ Error: \(error.localizedDescription)")
+                    self.errorMessage = "Network error"
+                    self.updateStatusBar()
+                    return
+                }
+                guard let http = response as? HTTPURLResponse else {
+                    self.errorMessage = "Invalid response"
+                    self.updateStatusBar()
+                    return
+                }
+                NSLog("📡 Status: \(http.statusCode)")
+
+                if http.statusCode == 401, allowRefresh {
+                    NSLog("🔁 Access token expired — refreshing")
+                    self.refreshAccessToken { ok in
+                        if ok {
+                            self.performUsageFetch(allowRefresh: false)
+                        } else {
+                            self.errorMessage = "Sign-in expired — run `codex login`"
+                            self.updateStatusBar()
+                        }
+                    }
+                    return
+                }
+                guard http.statusCode == 200, let data = data else {
+                    self.errorMessage = "HTTP \(http.statusCode)"
+                    self.updateStatusBar()
+                    return
+                }
+                if let s = String(data: data, encoding: .utf8) { NSLog("📦 Response: \(s)") }
+                self.parseUsageData(data)
+                self.updateStatusBar()
+            }
+        }.resume()
+    }
+
+    /// Refreshes the OAuth access token the same way the Codex CLI does.
+    /// The refreshed token is kept in memory only — auth.json stays CLI-owned.
+    private func refreshAccessToken(_ completion: @escaping (Bool) -> Void) {
+        guard !codexRefreshToken.isEmpty,
+              let url = URL(string: "https://auth.openai.com/oauth/token") else {
+            completion(false)
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "client_id": Self.oauthClientId,
+            "grant_type": "refresh_token",
+            "refresh_token": codexRefreshToken,
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
+            DispatchQueue.main.async {
+                guard let self = self,
+                      let http = response as? HTTPURLResponse, http.statusCode == 200,
+                      let data = data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let access = json["access_token"] as? String else {
+                    completion(false)
+                    return
+                }
+                self.codexAccessToken = access
+                if let refresh = json["refresh_token"] as? String { self.codexRefreshToken = refresh }
+                NSLog("✅ Access token refreshed")
+                completion(true)
+            }
+        }.resume()
+    }
+
+    func parseUsageData(_ data: Data) {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            errorMessage = "Invalid JSON"
+            return
+        }
+
+        NSLog("📊 Parsing usage data...")
+        planType = (json["plan_type"] as? String) ?? ""
+
+        func windowLabel(_ seconds: Int) -> String {
+            switch seconds {
+            case ..<21_600:        return "Session (\(max(1, seconds / 3600)) hour)"
+            case ..<172_800:       return "Daily (24 hour)"
+            case ..<1_209_600:     return "Weekly (7 day)"
+            default:               return "Limit (\(seconds / 86_400) day)"
+            }
+        }
+        func parseWindow(_ w: [String: Any]?) -> (percent: Int, label: String, resetsAt: Date?)? {
+            guard let w = w else { return nil }
+            let pct: Int
+            if let p = w["used_percent"] as? Int { pct = p }
+            else if let p = w["used_percent"] as? Double { pct = Int(p) }
+            else { return nil }
+            let seconds = (w["limit_window_seconds"] as? Int) ?? 0
+            var resets: Date?
+            if let ts = w["reset_at"] as? TimeInterval { resets = Date(timeIntervalSince1970: ts) }
+            else if let ts = w["reset_at"] as? Int { resets = Date(timeIntervalSince1970: TimeInterval(ts)) }
+            return (pct, windowLabel(seconds), resets)
+        }
+
+        let rateLimit = json["rate_limit"] as? [String: Any]
+        if let primary = parseWindow(rateLimit?["primary_window"] as? [String: Any]) {
+            sessionUsage = primary.percent
+            sessionLimit = 100
+            sessionLabel = primary.label
+            sessionResetsAt = primary.resetsAt
+        } else {
+            sessionUsage = 0
+            sessionResetsAt = nil
+        }
+
+        if let secondary = parseWindow(rateLimit?["secondary_window"] as? [String: Any]) {
+            hasWeekly = true
+            weeklyUsage = secondary.percent
+            weeklyLimit = 100
+            weeklyLabel = secondary.label
+            weeklyResetsAt = secondary.resetsAt
+        } else {
+            hasWeekly = false
+            weeklyUsage = 0
+            weeklyResetsAt = nil
+        }
+
+        // Per-model metered limits (e.g. GPT-5.3-Codex-Spark) — shown when used.
+        var extras: [AdditionalLimit] = []
+        if let additional = json["additional_rate_limits"] as? [[String: Any]] {
+            for entry in additional {
+                guard let name = entry["limit_name"] as? String else { continue }
+                let rl = entry["rate_limit"] as? [String: Any]
+                if let w = parseWindow(rl?["primary_window"] as? [String: Any]) {
+                    extras.append(AdditionalLimit(name: name, percent: w.percent,
+                                                  label: w.label, resetsAt: w.resetsAt))
+                }
+            }
+        }
+        additionalLimits = extras
+
+        // Codex credits (pay-as-you-go once limits are reached).
+        if let credits = json["credits"] as? [String: Any] {
+            creditsUnlimited = (credits["unlimited"] as? Bool) ?? false
+            let balanceStr = (credits["balance"] as? String) ?? "0"
+            creditsBalance = Int(balanceStr) ?? Int((credits["balance"] as? Int) ?? 0)
+            hasCredits = creditsUnlimited || creditsBalance > 0 || ((credits["has_credits"] as? Bool) ?? false)
+        } else {
+            creditsUnlimited = false
+            creditsBalance = 0
+            hasCredits = false
+        }
+        if let resetCredits = json["rate_limit_reset_credits"] as? [String: Any] {
+            resetCreditsAvailable = (resetCredits["available_count"] as? Int) ?? 0
+        } else {
+            resetCreditsAvailable = 0
+        }
+
+        NSLog("✅ Parsed: \(sessionLabel) \(sessionUsage)%\(hasWeekly ? ", \(weeklyLabel) \(weeklyUsage)%" : "")\(additionalLimits.isEmpty ? "" : ", extras \(additionalLimits.count)")\(hasCredits ? ", credits \(creditsBalance)" : "")")
+
+        lastUpdated = Date()
+        errorMessage = nil
+        hasFetchedData = true
+
+        updatePercentages()
+    }
+
+    func updateStatusBar() {
+        let sessionPercent = Int((Double(sessionUsage) / Double(sessionLimit)) * 100)
+
+        // Update the icon color
+        delegate?.updateStatusIcon(percentage: sessionPercent)
+
+        // Check for notification thresholds
+        checkNotificationThresholds(percentage: sessionPercent)
+    }
+
+    func checkNotificationThresholds(percentage: Int) {
+        NSLog("🔔 Checking notifications: percentage=\(percentage)%, enabled=\(usageNotificationsEnabled), lastNotified=\(lastNotifiedThreshold)%")
+
+        guard usageNotificationsEnabled else {
+            NSLog("⚠️ Usage notifications disabled")
+            return
+        }
+
+        let thresholds = [25, 50, 75, 90]
+
+        for threshold in thresholds {
+            if percentage >= threshold && lastNotifiedThreshold < threshold {
+                NSLog("📬 Sending notification for \(threshold)% threshold")
+                sendNotification(percentage: percentage, threshold: threshold)
+                lastNotifiedThreshold = threshold
+                // Persist the threshold
+                UserDefaults.standard.set(lastNotifiedThreshold, forKey: "last_notified_threshold")
+                UserDefaults.standard.synchronize()
+            }
+        }
+
+        // Reset if usage drops below current threshold
+        if percentage < lastNotifiedThreshold {
+            let newThreshold = thresholds.filter { $0 <= percentage }.last ?? 0
+            NSLog("🔄 Resetting notification threshold from \(lastNotifiedThreshold)% to \(newThreshold)%")
+            lastNotifiedThreshold = newThreshold
+            UserDefaults.standard.set(lastNotifiedThreshold, forKey: "last_notified_threshold")
+            UserDefaults.standard.synchronize()
+        }
+    }
+
+    func sendNotification(percentage: Int, threshold: Int) {
+        let notification = NSUserNotification()
+        notification.title = "Codex Usage Alert"
+        notification.informativeText = "You've reached \(percentage)% of your Codex usage limit"
+        notification.soundName = NSUserNotificationDefaultSoundName
+
+        NSUserNotificationCenter.default.deliver(notification)
+        NSLog("📬 Sent notification for \(threshold)% threshold")
+    }
+
+    func sendTestNotification() {
+        NSLog("🔔 Test notification button clicked")
+
+        let notification = NSUserNotification()
+        notification.title = "Codex Usage Alert"
+        notification.informativeText = "Test notification - You've reached 75% of your Codex usage limit"
+        notification.soundName = NSUserNotificationDefaultSoundName
+
+        NSUserNotificationCenter.default.deliver(notification)
+        NSLog("📬 Test notification sent successfully")
+    }
+
+    @Published var sessionPercentage: Double = 0.0
+    @Published var weeklyPercentage: Double = 0.0
+
+    func updatePercentages() {
+        sessionPercentage = Double(sessionUsage) / Double(sessionLimit)
+        weeklyPercentage = Double(weeklyUsage) / Double(weeklyLimit)
+    }
+}
+
+// MARK: - OpenAI Service Status
+
+struct StatusIncident: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let status: String           // investigating | identified | monitoring | resolved
+    let latestUpdate: String
+    let updatedAt: Date?
+    let componentIds: [String]
+}
+
+struct AffectedComponent: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let status: String           // degraded_performance | partial_outage | major_outage
+}
+
+struct StatusComponent: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let status: String           // operational | degraded_performance | ...
+}
+
+private let defaultTrackedComponents: [StatusComponent] = [
+    StatusComponent(id: "01KMKFAMWKQ81YWSE1Z18R6VHR", name: "Codex in ChatGPT Desktop", status: "operational"),
+    StatusComponent(id: "01KMP3KP5MGE23B80K1EK4S8PV", name: "Codex API",                status: "operational"),
+    StatusComponent(id: "01KMP3KP5M8X0EBTVW6KN327EE", name: "VS Code extension",        status: "operational"),
+    StatusComponent(id: "01JSM5RTJWHRWDTS6Q604VEW3B", name: "Login",                    status: "operational"),
+    StatusComponent(id: "01JMXBNJXGV1T5GT2M9XA83XNG", name: "Conversations",            status: "operational"),
+]
+
+private let defaultTrackedComponentIdSet: Set<String> = Set(
+    defaultTrackedComponents.map { $0.id }
+)
+
+class StatusManager: ObservableObject {
+    @Published var indicator: String = "none"        // none | minor | major | critical (raw, global)
+    @Published var statusDescription: String = "All systems operational"
+    @Published var incidents: [StatusIncident] = []
+    @Published var affectedComponents: [AffectedComponent] = []
+    @Published var allComponents: [StatusComponent] = defaultTrackedComponents
+    @Published var selectedComponentIds: Set<String> = defaultTrackedComponentIdSet
+    @Published var lastUpdated: Date?
+    @Published var hasFetched: Bool = false
+
+    // Canonical URL (status.openai.com 302-redirects here)
+    private let endpoint = URL(string: "https://status.openai.com/api/v2/summary.json")!
+
+    init() {
+        if let saved = UserDefaults.standard.array(forKey: "tracked_component_ids") as? [String] {
+            selectedComponentIds = Set(saved)
+        }
+        // Clean up legacy debug pref if present
+        UserDefaults.standard.removeObject(forKey: "status_preview_mode")
+    }
+
+    func toggleComponent(_ id: String) {
+        if selectedComponentIds.contains(id) {
+            selectedComponentIds.remove(id)
+        } else {
+            selectedComponentIds.insert(id)
+        }
+        UserDefaults.standard.set(Array(selectedComponentIds), forKey: "tracked_component_ids")
+    }
+
+    func isTracked(_ id: String) -> Bool {
+        selectedComponentIds.contains(id)
+    }
+
+    // MARK: - Filtered/effective views (respect tracked components)
+
+    var filteredAffectedComponents: [AffectedComponent] {
+        affectedComponents.filter { selectedComponentIds.contains($0.id) }
+    }
+
+    var filteredIncidents: [StatusIncident] {
+        incidents.filter { incident in
+            guard !incident.componentIds.isEmpty else { return true }
+            return incident.componentIds.contains(where: { selectedComponentIds.contains($0) })
+        }
+    }
+
+    var effectiveIndicator: String {
+        let trackedComponents = allComponents.filter { selectedComponentIds.contains($0.id) }
+        let max = trackedComponents.map { severity(for: $0.status) }.max() ?? 0
+        switch max {
+        case 0:  return "none"
+        case 1:  return "minor"
+        case 2:  return "major"
+        default: return "critical"
+        }
+    }
+
+    private func severity(for componentStatus: String) -> Int {
+        switch componentStatus {
+        case "operational":          return 0
+        case "under_maintenance":    return 1
+        case "degraded_performance": return 1
+        case "partial_outage":       return 2
+        case "major_outage":         return 3
+        default:                     return 0
+        }
+    }
+
+    func fetch() {
+        let request = URLRequest(url: endpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            guard let self = self, let data = data else { return }
+            self.parse(data)
+        }.resume()
+    }
+
+    private func parse(_ data: Data) {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let status = json["status"] as? [String: Any],
+              let indicator = status["indicator"] as? String,
+              let desc = status["description"] as? String else {
+            return
+        }
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoNoFrac = ISO8601DateFormatter()
+        isoNoFrac.formatOptions = [.withInternetDateTime]
+
+        var parsedIncidents: [StatusIncident] = []
+        if let raw = json["incidents"] as? [[String: Any]] {
+            for inc in raw {
+                guard let id = inc["id"] as? String,
+                      let name = inc["name"] as? String,
+                      let st = inc["status"] as? String else { continue }
+                if st == "resolved" || st == "postmortem" { continue }
+                let updates = inc["incident_updates"] as? [[String: Any]] ?? []
+                let latest = (updates.first?["body"] as? String) ?? ""
+                let dateStr = (updates.first?["created_at"] as? String) ?? (inc["updated_at"] as? String)
+                let updatedAt = dateStr.flatMap { iso.date(from: $0) ?? isoNoFrac.date(from: $0) }
+                let compIds = (inc["components"] as? [[String: Any]] ?? [])
+                    .compactMap { $0["id"] as? String }
+                parsedIncidents.append(StatusIncident(
+                    id: id, name: name, status: st, latestUpdate: latest,
+                    updatedAt: updatedAt,
+                    componentIds: compIds
+                ))
+            }
+        }
+
+        var parsedAffected: [AffectedComponent] = []
+        var parsedAll: [StatusComponent] = []
+        if let raw = json["components"] as? [[String: Any]] {
+            for c in raw {
+                guard let id = c["id"] as? String,
+                      let name = c["name"] as? String,
+                      let st = c["status"] as? String else { continue }
+                parsedAll.append(StatusComponent(id: id, name: name, status: st))
+                if st != "operational" {
+                    parsedAffected.append(AffectedComponent(id: id, name: name, status: st))
+                }
+            }
+        }
+
+        DispatchQueue.main.async {
+            let isFirstFetch = !self.hasFetched
+
+            self.indicator = indicator
+            self.statusDescription = desc
+            self.incidents = parsedIncidents
+            self.affectedComponents = parsedAffected
+            if !parsedAll.isEmpty {
+                self.allComponents = parsedAll
+                // First time we see real components: OpenAI's status page lists ~25
+                // services, most irrelevant to Codex users. Default-track only the
+                // Codex-adjacent ones; users can tick anything else.
+                if UserDefaults.standard.array(forKey: "tracked_component_ids") == nil {
+                    let relevant = ["codex", "vs code", "login", "conversations"]
+                    let defaultIds = parsedAll
+                        .filter { comp in relevant.contains { comp.name.localizedCaseInsensitiveContains($0) } }
+                        .map { $0.id }
+                    self.selectedComponentIds = Set(defaultIds)
+                    UserDefaults.standard.set(Array(self.selectedComponentIds),
+                                              forKey: "tracked_component_ids")
+                }
+            }
+            self.lastUpdated = Date()
+            self.hasFetched = true
+
+            // Notify on transitions of EFFECTIVE (filtered) indicator
+            let effective = self.effectiveIndicator
+            let previous = UserDefaults.standard.string(forKey: "last_effective_indicator")
+            if !isFirstFetch, let previous = previous, previous != effective {
+                self.notifyStatusChange(to: effective, description: desc)
+            }
+            UserDefaults.standard.set(effective, forKey: "last_effective_indicator")
+        }
+    }
+
+    private func notifyStatusChange(to indicator: String, description: String) {
+        guard UserDefaults.standard.bool(forKey: "status_notifications_enabled") else { return }
+
+        let notification = NSUserNotification()
+        if indicator == "none" {
+            notification.title = "OpenAI services back online"
+            notification.informativeText = "All systems operational"
+        } else {
+            notification.title = "OpenAI status: \(description)"
+            notification.informativeText = "Visit status.openai.com for details"
+        }
+        notification.soundName = NSUserNotificationDefaultSoundName
+        NSUserNotificationCenter.default.deliver(notification)
+        NSLog("📬 Sent status-change notification: \(indicator)")
+    }
+}
+
+// MARK: - App Updates
+
+struct BannerButton: Equatable {
+    let label: String
+    let url: URL?         // optional — opens this URL (validated)
+    let action: String?   // "dismiss" closes the banner; nil = no extra side effect
+    let style: String?    // "primary" | "secondary" | nil
+}
+
+struct AvailableUpdate: Equatable {
+    let version: String
+    let title: String
+    let body: String
+    let buttons: [BannerButton]
+}
+
+// Free-form message channel, decoupled from the app version. Driven by the
+// `message` object in latest.json and keyed on `id` (not version), so any
+// message can be sent at any time without shipping a new build. Every field is
+// author-controlled — including the notification title, which is NOT possible
+// on the legacy version-based channel.
+struct Announcement: Equatable {
+    let id: String
+    let heading: String?          // optional small top line on the card (nil = none)
+    let title: String
+    let body: String
+    let buttons: [BannerButton]
+    let notify: Bool              // false = show the in-app card only, no OS notification
+    let notifTitle: String        // fully custom notification title
+    let notifBody: String         // fully custom notification body
+}
+
+class UpdateManager: ObservableObject {
+    @Published var available: AvailableUpdate?
+    @Published var announcement: Announcement?
+
+    // Served directly from the repo via GitHub — free, unlimited, no Vercel meter.
+    // Same file as website/latest.json so existing v1.1 users on Vercel see the same JSON.
+    private let endpoint = URL(string: "https://raw.githubusercontent.com/Artzainnn/CodexUsageBar/main/website/latest.json")!
+
+    var currentVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+    }
+
+    private static let allowedHostSuffixes = [
+        "github.com",
+        "codexusagebar.com"
+    ]
+
+    static func isSafeURL(_ url: URL) -> Bool {
+        guard url.scheme == "https" else { return false }
+        guard let host = url.host?.lowercased() else { return false }
+        return allowedHostSuffixes.contains(where: { host == $0 || host.hasSuffix("." + $0) })
+    }
+
+    private static func parseButtons(from json: [String: Any]) -> [BannerButton] {
+        // Explicit `buttons` array (new schema, supports any combination)
+        if let raw = json["buttons"] as? [[String: Any]] {
+            return raw.compactMap { dict -> BannerButton? in
+                guard let label = dict["label"] as? String, !label.isEmpty else { return nil }
+                let urlStr = dict["url"] as? String
+                let url = urlStr.flatMap { URL(string: $0) }
+                if let url = url, !isSafeURL(url) { return nil }   // reject unsafe URLs
+                return BannerButton(
+                    label: label,
+                    url: url,
+                    action: dict["action"] as? String,
+                    style: dict["style"] as? String
+                )
+            }
+        }
+        // Back-compat: legacy `download_url` builds the default 2-button layout
+        if let urlStr = json["download_url"] as? String,
+           let url = URL(string: urlStr),
+           isSafeURL(url) {
+            return [
+                BannerButton(label: "Download", url: url, action: nil, style: "primary"),
+                BannerButton(label: "Later",    url: nil, action: "dismiss", style: nil)
+            ]
+        }
+        return []
+    }
+
+    func fetch() {
+        let request = URLRequest(url: endpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            guard let self = self,
+                  let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                NSLog("⚠️ Update fetch failed or invalid payload")
+                return
+            }
+
+            // ---- Legacy version-update channel (for real releases; also what
+            //      pre-1.3.1 apps rely on). Optional — absent fields = no update.
+            let updatePayload: AvailableUpdate? = {
+                guard let version = json["version"] as? String,
+                      let title = json["title"] as? String,
+                      let body = json["description"] as? String else { return nil }
+                return AvailableUpdate(version: version, title: title, body: body,
+                                       buttons: Self.parseButtons(from: json))
+            }()
+
+            // ---- Free-form message channel (`message` object, keyed on `id`).
+            //      Every field author-controlled, including the notification title.
+            let announcementPayload: Announcement? = {
+                guard let msg = json["message"] as? [String: Any],
+                      let id = msg["id"] as? String, !id.isEmpty else { return nil }
+                let title = msg["title"] as? String ?? ""
+                let body  = msg["body"]  as? String ?? ""
+                let notif = msg["notification"] as? [String: Any]
+                return Announcement(
+                    id: id,
+                    heading: msg["heading"] as? String,
+                    title: title,
+                    body: body,
+                    buttons: Self.parseButtons(from: msg),
+                    notify: (msg["notify"] as? Bool) ?? true,
+                    notifTitle: (notif?["title"] as? String) ?? (title.isEmpty ? "CodexUsageBar" : title),
+                    notifBody:  (notif?["body"]  as? String) ?? body
+                )
+            }()
+
+            DispatchQueue.main.async {
+                // Version-update channel
+                if let update = updatePayload, self.isNewer(remote: update.version, than: self.currentVersion) {
+                    if self.available != update {
+                        self.available = update
+                        NSLog("⬆️ Update available: \(update.version)")
+                    }
+                    let lastNotified = UserDefaults.standard.string(forKey: "last_notified_update_version")
+                    if lastNotified != update.version {
+                        let n = NSUserNotification()
+                        n.title = "CodexUsageBar \(update.version) is available"
+                        n.informativeText = update.title
+                        n.soundName = NSUserNotificationDefaultSoundName
+                        NSUserNotificationCenter.default.deliver(n)
+                        UserDefaults.standard.set(update.version, forKey: "last_notified_update_version")
+                        NSLog("📬 Sent update notification for \(update.version)")
+                    }
+                } else {
+                    self.available = nil
+                }
+
+                // Message channel — notify once per `id`. On the very first run
+                // that supports messages, seed the current id WITHOUT notifying so
+                // updating from an older version doesn't re-ping the live message.
+                if let ann = announcementPayload {
+                    let dismissed = UserDefaults.standard.string(forKey: "dismissed_message_id")
+                    self.announcement = (dismissed == ann.id) ? nil : ann
+
+                    let lastShown = UserDefaults.standard.string(forKey: "last_shown_message_id")
+                    if lastShown == nil {
+                        UserDefaults.standard.set(ann.id, forKey: "last_shown_message_id")   // seed, no notif
+                    } else if lastShown != ann.id {
+                        if ann.notify {
+                            let n = NSUserNotification()
+                            n.title = ann.notifTitle
+                            n.informativeText = ann.notifBody
+                            n.soundName = NSUserNotificationDefaultSoundName
+                            NSUserNotificationCenter.default.deliver(n)
+                            NSLog("📬 Sent message notification for id \(ann.id)")
+                        }
+                        UserDefaults.standard.set(ann.id, forKey: "last_shown_message_id")
+                    }
+                } else {
+                    self.announcement = nil
+                }
+            }
+        }.resume()
+    }
+
+    func dismissCurrent() {
+        // Announcement takes priority in the UI, so dismiss it first if present.
+        if let id = announcement?.id {
+            UserDefaults.standard.set(id, forKey: "dismissed_message_id")
+            announcement = nil
+            return
+        }
+        if let v = available?.version {
+            UserDefaults.standard.set(v, forKey: "dismissed_update_version")
+        }
+        available = nil
+    }
+
+    var isCurrentDismissed: Bool {
+        guard let v = available?.version else { return false }
+        return UserDefaults.standard.string(forKey: "dismissed_update_version") == v
+    }
+
+    private func isNewer(remote: String, than current: String) -> Bool {
+        let r = remote.split(separator: ".").map { Int($0) ?? 0 }
+        let c = current.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(r.count, c.count) {
+            let a = i < r.count ? r[i] : 0
+            let b = i < c.count ? c[i] : 0
+            if a != b { return a > b }
+        }
+        return false
+    }
+}
+
+// Custom NSTextField that properly handles paste
+class CustomTextField: NSTextField {
+    var onTextChange: ((String) -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.type == .keyDown {
+            if (event.modifierFlags.contains(.command)) {
+                switch event.charactersIgnoringModifiers {
+                case "v":
+                    if let string = NSPasteboard.general.string(forType: .string) {
+                        self.stringValue = string
+                        onTextChange?(string)
+                        NSLog("CodexUsage: Pasted text length: \(string.count)")
+                        return true
+                    }
+                case "a":
+                    self.currentEditor()?.selectAll(nil)
+                    return true
+                case "c":
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(self.stringValue, forType: .string)
+                    return true
+                case "x":
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(self.stringValue, forType: .string)
+                    self.stringValue = ""
+                    onTextChange?("")
+                    return true
+                default:
+                    break
+                }
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func textDidChange(_ notification: Notification) {
+        super.textDidChange(notification)
+        onTextChange?(self.stringValue)
+    }
+}
+
+// Custom TextView that ensures keyboard commands work
+class PasteableNSTextView: NSTextView {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command) {
+            switch event.charactersIgnoringModifiers {
+            case "v": // Paste
+                paste(nil)
+                return true
+            case "c": // Copy
+                copy(nil)
+                return true
+            case "x": // Cut
+                cut(nil)
+                return true
+            case "a": // Select All
+                selectAll(nil)
+                return true
+            default:
+                break
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+// Multi-line text field with proper paste support
+struct PasteableTextField: NSViewRepresentable {
+    @Binding var text: String
+    var placeholder: String
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        let textView = PasteableNSTextView()
+
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.font = NSFont.systemFont(ofSize: 11)
+        textView.textColor = .labelColor
+        textView.backgroundColor = .textBackgroundColor
+        textView.drawsBackground = true
+        textView.isRichText = false
+        textView.delegate = context.coordinator
+        textView.textContainerInset = NSSize(width: 4, height: 4)
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.usesFindBar = false
+        textView.isGrammarCheckingEnabled = false
+        textView.allowsUndo = true
+
+        // Enable wrapping
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+
+        scrollView.documentView = textView
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .bezelBorder
+
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        guard let textView = nsView.documentView as? PasteableNSTextView else { return }
+        if textView.string != text {
+            textView.string = text
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: PasteableTextField
+
+        init(_ parent: PasteableTextField) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+        }
+    }
+}
+
+private struct ContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+struct UsageView: View {
+    @ObservedObject var usageManager: UsageManager
+    @ObservedObject var statusManager: StatusManager
+    @ObservedObject var updateManager: UpdateManager
+    @State private var showingSettings: Bool = false
+    @State private var showingStatusDetails: Bool = false
+    @State private var measuredHeight: CGFloat = 250
+
+    private let maxPopupHeight: CGFloat = 600
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                content
+                    .padding()
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
+                        }
+                    )
+            }
+            .frame(width: 360, height: min(max(measuredHeight, 100), maxPopupHeight))
+            // Darken the translucent popover material so contrast stays consistent
+            // no matter how light the content behind the popover is.
+            .background(Color(red: 0.07, green: 0.07, blue: 0.08).opacity(0.62))
+            .onPreferenceChange(ContentHeightKey.self) { value in
+                guard value > 0 else { return }
+                measuredHeight = value
+            }
+            .onAppear {
+                usageManager.updatePercentages()
+            }
+            .onChange(of: showingSettings) { isOpen in
+                if isOpen {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        withAnimation(.easeInOut(duration: 0.35)) {
+                            proxy.scrollTo("settings-anchor", anchor: .bottom)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    var content: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Codex Usage")
+                .font(.headline)
+                .padding(.bottom, 4)
+
+            // Free-form message banner (author-controlled). Takes priority over
+            // the version-update banner when both are present.
+            if let ann = updateManager.announcement {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        if let heading = ann.heading, !heading.isEmpty {
+                            Text(heading)
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                        }
+                        Spacer()
+                        Button(action: { updateManager.dismissCurrent() }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    if !ann.title.isEmpty {
+                        Text(ann.title)
+                            .font(.caption)
+                    }
+                    if !ann.body.isEmpty {
+                        Text(ann.body)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if !ann.buttons.isEmpty {
+                        HStack(spacing: 6) {
+                            ForEach(ann.buttons.indices, id: \.self) { i in
+                                bannerButton(ann.buttons[i])
+                            }
+                        }
+                    }
+                }
+                .padding(8)
+                .background(Color.accentColor.opacity(0.12))
+                .cornerRadius(6)
+            }
+
+            // App update banner (version-based). Hidden while a message banner shows.
+            if updateManager.announcement == nil,
+               let update = updateManager.available, !updateManager.isCurrentDismissed {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Text("⬆️")
+                        Text("Version \(update.version) available")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Spacer()
+                        Button(action: { updateManager.dismissCurrent() }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    Text(update.title)
+                        .font(.caption)
+                    Text(update.body)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !update.buttons.isEmpty {
+                        HStack(spacing: 6) {
+                            ForEach(update.buttons.indices, id: \.self) { i in
+                                bannerButton(update.buttons[i])
+                            }
+                        }
+                    }
+                }
+                .padding(8)
+                .background(Color.accentColor.opacity(0.12))
+                .cornerRadius(6)
+            }
+
+            if let error = usageManager.errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .padding(.bottom, 8)
+            }
+
+            // Only show usage if data has been fetched
+            if !usageManager.hasFetchedData {
+                Text("👋 Welcome! Set your session cookie below to get started.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .padding(.vertical, 8)
+            }
+
+            // Primary window (label derived from the API's window duration)
+            if usageManager.hasFetchedData {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(usageManager.sessionLabel)
+                        .font(.subheadline)
+                    Spacer()
+                    if let resetTime = usageManager.sessionResetsAt {
+                        Text("Resets \(formatResetTime(resetTime, includeDate: true))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                ProgressView(value: usageManager.sessionPercentage)
+                    .tint(colorForPercentage(usageManager.sessionPercentage))
+
+                Text("\(Int(usageManager.sessionPercentage * 100))% used")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            // Secondary window (weekly) — absent on some plans
+            if usageManager.hasWeekly {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(usageManager.weeklyLabel)
+                            .font(.subheadline)
+                        Spacer()
+                        if let resetTime = usageManager.weeklyResetsAt {
+                            Text("Resets \(formatResetTime(resetTime, includeDate: true))")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    ProgressView(value: usageManager.weeklyPercentage)
+                        .tint(colorForPercentage(usageManager.weeklyPercentage))
+
+                    Text("\(Int(usageManager.weeklyPercentage * 100))% used")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // Per-model metered limits — only surfaced once used (>= 1%)
+            ForEach(usageManager.additionalLimits.filter { $0.percent >= 1 }) { limit in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(limit.name)
+                            .font(.subheadline)
+                        Spacer()
+                        if let resetTime = limit.resetsAt {
+                            Text("Resets \(formatResetTime(resetTime, includeDate: true))")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    ProgressView(value: Double(limit.percent) / 100.0)
+                        .tint(colorForPercentage(Double(limit.percent) / 100.0))
+
+                    Text("\(limit.percent)% used")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // Codex credits — shown once the account has any
+            if usageManager.hasCredits {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Codex credits")
+                            .font(.subheadline)
+                        Spacer()
+                        Button(action: {
+                            if let url = URL(string: "https://chatgpt.com/codex/settings/usage") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }) {
+                            Text("Manage →")
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(.accentColor)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+
+                    Text(usageManager.creditsUnlimited
+                         ? "Unlimited credits"
+                         : "\(usageManager.creditsBalance) credits left")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // Discreet info line: reset credits when available, else reassurance
+            if usageManager.resetCreditsAvailable > 0 {
+                Text("\(usageManager.resetCreditsAvailable) rate-limit reset credits available")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .opacity(0.6)
+            } else if !usageManager.hasCredits && !usageManager.additionalLimits.contains(where: { $0.percent >= 1 }) {
+                Text("No extra usage")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .opacity(0.6)
+            }
+            }
+
+            if statusManager.hasFetched {
+                Divider()
+            }
+
+            // Anthropic service status (compact; expandable on issue)
+            if statusManager.hasFetched {
+                let effective = statusManager.effectiveIndicator
+                let filteredIncidents = statusManager.filteredIncidents
+                let filteredAffected = statusManager.filteredAffectedComponents
+                let hasIssue = effective != "none"
+                    && (!filteredIncidents.isEmpty || !filteredAffected.isEmpty)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    // Compact header row
+                    HStack(alignment: .top, spacing: 6) {
+                        Circle()
+                            .fill(statusColor(for: effective))
+                            .frame(width: 8, height: 8)
+                            .padding(.top, 4)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(effective == "none"
+                                 ? "All OpenAI services operational"
+                                 : statusManager.statusDescription)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(statusContextLine(for: statusManager))
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        if hasIssue {
+                            Button(action: { showingStatusDetails.toggle() }) {
+                                HStack(spacing: 2) {
+                                    Text(showingStatusDetails ? "Hide" : "Details")
+                                    Image(systemName: showingStatusDetails ? "chevron.up" : "chevron.down")
+                                        .font(.system(size: 8))
+                                }
+                                .font(.caption2)
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+
+                    // Expanded panel
+                    if hasIssue && showingStatusDetails {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(filteredIncidents) { incident in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    // Title
+                                    Text(incident.name)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .fixedSize(horizontal: false, vertical: true)
+
+                                    // Status badge + updated time
+                                    HStack(spacing: 8) {
+                                        Text(incident.status.uppercased())
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundColor(.white)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(badgeColor(for: incident.status))
+                                            .cornerRadius(3)
+                                        if let updated = incident.updatedAt {
+                                            Text("Updated \(relativeTime(updated))")
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+
+                                    // Body
+                                    if !incident.latestUpdate.isEmpty {
+                                        Text(incident.latestUpdate)
+                                            .font(.caption)
+                                            .foregroundColor(.primary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .padding(.top, 2)
+                                    }
+                                }
+                            }
+
+                            // Affected components (when no formal incident)
+                            if filteredIncidents.isEmpty && !filteredAffected.isEmpty {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Affected services")
+                                        .font(.caption2)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(.secondary)
+                                    ForEach(filteredAffected) { c in
+                                        HStack(spacing: 6) {
+                                            Circle()
+                                                .fill(Color.orange)
+                                                .frame(width: 5, height: 5)
+                                            Text(c.name).font(.caption2)
+                                            Spacer()
+                                            Text(componentLabel(c.status))
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+                                }
+                            }
+
+                            Divider()
+
+                            HStack {
+                                if let lastCheck = statusManager.lastUpdated {
+                                    Text("Checked \(relativeTime(lastCheck))")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Button(action: {
+                                    NSWorkspace.shared.open(URL(string: "https://status.openai.com")!)
+                                }) {
+                                    Text("Open status page →")
+                                        .font(.caption2)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                        .padding(10)
+                        .background(Color.orange.opacity(0.10))
+                        .cornerRadius(6)
+                    }
+                }
+            }
+
+            if usageManager.hasFetchedData {
+            Divider()
+
+            HStack {
+                Text("Last updated: \(formatTime(usageManager.lastUpdated))")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button("Refresh") {
+                    usageManager.fetchUsage()
+                    statusManager.fetch()
+                    updateManager.fetch()
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+            }
+            }
+
+            // Sign-in status: the app reads the Codex CLI's local sign-in, no cookie needed.
+            if !usageManager.hasFetchedData {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Connect your Codex account")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("1. Install the Codex CLI (npm i -g @openai/codex)")
+                        Text("2. Run `codex login` and sign in with ChatGPT")
+                        Text("3. Click Re-check below")
+                    }
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+
+                    HStack(spacing: 8) {
+                        Button("Re-check") {
+                            usageManager.fetchUsage()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+
+                        Button("Setup guide →") {
+                            NSWorkspace.shared.open(URL(string: "https://github.com/Artzainnn/CodexUsageBar#setup")!)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+                .padding(8)
+                .background(Color.secondary.opacity(0.1))
+                .cornerRadius(6)
+            }
+
+            // Support Section
+            Button(action: {
+                NSWorkspace.shared.open(URL(string: "https://donate.stripe.com/3cIcN5b5H7Q8ay8bIDfIs02")!)
+            }) {
+                HStack(spacing: 4) {
+                    Text("☕")
+                    Text("Buy Dev a Coffee")
+                }
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+            .foregroundColor(.orange)
+
+            // Settings Section
+            Button(showingSettings ? "Hide Settings" : "Settings") {
+                showingSettings.toggle()
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+
+            if showingSettings {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle(isOn: Binding(
+                        get: { usageManager.openAtLogin },
+                        set: { newValue in
+                            usageManager.openAtLogin = newValue
+                            usageManager.applyLoginItem(newValue)
+                            usageManager.saveSettings()
+                        }
+                    )) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Open at Login")
+                                .font(.caption)
+                            Text("Launch app automatically when you log in")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle(isOn: Binding(
+                            get: { usageManager.usageNotificationsEnabled },
+                            set: { newValue in
+                                usageManager.usageNotificationsEnabled = newValue
+                                usageManager.saveSettings()
+                            }
+                        )) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Enable Usage Notifications")
+                                    .font(.caption)
+                                Text("Get alerts at 25%, 50%, 75%,\nand 90% session usage")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .toggleStyle(.checkbox)
+
+                        Toggle(isOn: Binding(
+                            get: { usageManager.statusNotificationsEnabled },
+                            set: { newValue in
+                                usageManager.statusNotificationsEnabled = newValue
+                                usageManager.saveSettings()
+                            }
+                        )) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Enable Status Notifications")
+                                    .font(.caption)
+                                Text("Get alerts when tracked OpenAI services have an outage")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .toggleStyle(.checkbox)
+
+                        Button("Test Notification") {
+                            usageManager.sendTestNotification()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle(isOn: Binding(
+                            get: { usageManager.shortcutEnabled },
+                            set: { newValue in
+                                usageManager.shortcutEnabled = newValue
+                                usageManager.saveSettings()
+                                if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
+                                    appDelegate.setShortcutEnabled(newValue)
+                                }
+                            }
+                        )) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Keyboard Shortcut (⌘U)")
+                                    .font(.caption)
+                                Text("Toggle popup from anywhere.\nDisable if it conflicts with other apps.")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .toggleStyle(.switch)
+
+                        if usageManager.shortcutEnabled && !usageManager.isAccessibilityEnabled {
+                            Button("Grant Accessibility Permission") {
+                                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+
+                            Text("Accessibility permission may be needed\nfor the shortcut to work in all apps")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Status alerts: services to track")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Text("Only tick the OpenAI services you use. Status issues with unticked services won't be shown or trigger alerts.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        ForEach(statusManager.allComponents) { component in
+                            Toggle(isOn: Binding(
+                                get: { statusManager.isTracked(component.id) },
+                                set: { _ in statusManager.toggleComponent(component.id) }
+                            )) {
+                                Text(component.name)
+                                    .font(.caption2)
+                            }
+                            .toggleStyle(.checkbox)
+                        }
+                    }
+
+                }
+                .padding(8)
+                .background(Color.secondary.opacity(0.1))
+                .cornerRadius(6)
+
+                // Anchor for scroll-to-bottom when Settings opens
+                Color.clear
+                    .frame(height: 1)
+                    .id("settings-anchor")
+            }
+        }
+    }
+
+    func formatNumber(_ number: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        return formatter.string(from: NSNumber(value: number)) ?? "\(number)"
+    }
+
+    func formatTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
+    func formatResetTime(_ date: Date, includeDate: Bool = false) -> String {
+        let formatter = DateFormatter()
+
+        if includeDate {
+            // Format: "on 31 Jan 2026 at 7:59 AM"
+            formatter.dateFormat = "d MMM yyyy 'at' h:mm a"
+            return "on \(formatter.string(from: date))"
+        } else {
+            formatter.timeStyle = .short
+            formatter.dateStyle = .none
+            return "at \(formatter.string(from: date))"
+        }
+    }
+
+    func colorForPercentage(_ percentage: Double) -> Color {
+        if percentage < 0.7 {
+            return .green
+        } else if percentage < 0.9 {
+            return .orange
+        } else {
+            return .red
+        }
+    }
+
+    func statusColor(for indicator: String) -> Color {
+        switch indicator {
+        case "none":     return .green
+        case "minor":    return .yellow
+        case "major":    return .orange
+        case "critical": return .red
+        default:         return .gray
+        }
+    }
+
+    func statusLabel(for indicator: String, description: String) -> String {
+        if indicator == "none" {
+            return "OpenAI: all systems operational"
+        }
+        return "OpenAI: \(description)"
+    }
+
+    func relativeTime(_ date: Date) -> String {
+        let elapsed = Int(Date().timeIntervalSince(date))
+        if elapsed < 60 { return "just now" }
+        if elapsed < 3600 {
+            let m = elapsed / 60
+            return "\(m) min\(m == 1 ? "" : "s") ago"
+        }
+        if elapsed < 86_400 {
+            let h = elapsed / 3600
+            return "\(h) hour\(h == 1 ? "" : "s") ago"
+        }
+        let d = elapsed / 86_400
+        return "\(d) day\(d == 1 ? "" : "s") ago"
+    }
+
+    func statusContextLine(for sm: StatusManager) -> String {
+        let tracked = sm.allComponents.filter { sm.selectedComponentIds.contains($0.id) }
+        let trackedNames = tracked.prefix(4).map { shortName($0.name) }.joined(separator: ", ")
+        let extra = tracked.count > 4 ? " +\(tracked.count - 4)" : ""
+        let trackedSummary = tracked.isEmpty ? "No services tracked" : "Tracks \(trackedNames)\(extra)"
+
+        if sm.effectiveIndicator == "none" {
+            if let lastCheck = sm.lastUpdated {
+                return "\(trackedSummary) · checked \(relativeTime(lastCheck))"
+            }
+            return trackedSummary
+        }
+        let affected = sm.filteredAffectedComponents
+        if !affected.isEmpty {
+            let names = affected.prefix(3).map { shortName($0.name) }.joined(separator: ", ")
+            let more = affected.count > 3 ? " +\(affected.count - 3)" : ""
+            return "Affects: \(names)\(more)"
+        }
+        if let lastCheck = sm.lastUpdated {
+            return "Checked \(relativeTime(lastCheck))"
+        }
+        return ""
+    }
+
+    func shortName(_ raw: String) -> String {
+        if let paren = raw.range(of: " (") {
+            return String(raw[..<paren.lowerBound])
+        }
+        return raw
+    }
+
+    @ViewBuilder
+    func bannerButton(_ btn: BannerButton) -> some View {
+        let tap = {
+            if let url = btn.url {
+                NSWorkspace.shared.open(url)
+            }
+            if btn.action == "dismiss" {
+                updateManager.dismissCurrent()
+            }
+        }
+        if btn.style == "primary" {
+            Button(btn.label, action: tap)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+        } else {
+            Button(btn.label, action: tap)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+    }
+
+    func badgeColor(for status: String) -> Color {
+        switch status {
+        case "investigating": return Color.red.opacity(0.8)
+        case "identified":    return Color.orange
+        case "monitoring":    return Color.blue
+        case "resolved":      return Color.green
+        default:              return Color.gray
+        }
+    }
+
+    func componentLabel(_ status: String) -> String {
+        switch status {
+        case "degraded_performance": return "degraded"
+        case "partial_outage":       return "partial outage"
+        case "major_outage":         return "major outage"
+        case "under_maintenance":    return "maintenance"
+        default:                     return status
+        }
+    }
+
+}
