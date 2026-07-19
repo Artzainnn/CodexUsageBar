@@ -452,7 +452,7 @@ class UsageManager: ObservableObject {
     func fetchUsage() {
         guard loadCodexAuth() else {
             DispatchQueue.main.async {
-                self.errorMessage = "Not signed in — run `codex login` in Terminal"
+                self.errorMessage = "Not signed in. Run codex login in Terminal"
                 self.isLoading = false
                 self.updateStatusBar()
             }
@@ -498,7 +498,7 @@ class UsageManager: ObservableObject {
                         if ok {
                             self.performUsageFetch(allowRefresh: false)
                         } else {
-                            self.errorMessage = "Sign-in expired — run `codex login`"
+                            self.errorMessage = "Sign-in expired. Run codex login"
                             self.updateStatusBar()
                         }
                     }
