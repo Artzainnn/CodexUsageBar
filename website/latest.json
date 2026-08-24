@@ -1,7 +1,7 @@
 {
-  "version": "1.0.0",
-  "title": "Welcome to CodexUsageBar",
-  "description": "You're on the latest version.",
+  "version": "1.1.0",
+  "title": "Light mode fixed",
+  "description": "The app now matches macOS light and dark mode. Choose your look in Settings > Appearance.",
   "buttons": [
     {
       "label": "Download",
