@@ -1967,8 +1967,10 @@ struct UsageView: View {
         let formatter = DateFormatter()
 
         if includeDate {
-            // Format: "on 31 Jan 2026 at 7:59 AM"
-            formatter.dateFormat = "d MMM yyyy 'at' h:mm a"
+            // Use locale-aware formatting that respects system settings
+            // Automatically shows 24h format in most countries, 12h with AM/PM in US/Philippines/etc.
+            formatter.dateStyle = .medium      // "Jan 31, 2026" or locale equivalent
+            formatter.timeStyle = .short       // "19:59" or "7:59 PM" depending on locale
             return "on \(formatter.string(from: date))"
         } else {
             formatter.timeStyle = .short
