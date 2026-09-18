@@ -394,7 +394,7 @@ class UsageManager: ObservableObject {
     @Published var additionalLimits: [AdditionalLimit] = []
     // Codex credits (pay-as-you-go once limits are reached).
     @Published var hasCredits: Bool = false
-    @Published var creditsBalance: Int = 0
+    @Published var creditsBalance: Double = 0
     @Published var creditsUnlimited: Bool = false
     @Published var resetCreditsAvailable: Int = 0
     @Published var planType: String = ""
@@ -684,8 +684,15 @@ class UsageManager: ObservableObject {
         // Codex credits (pay-as-you-go once limits are reached).
         if let credits = json["credits"] as? [String: Any] {
             creditsUnlimited = (credits["unlimited"] as? Bool) ?? false
-            let balanceStr = (credits["balance"] as? String) ?? "0"
-            creditsBalance = Int(balanceStr) ?? Int((credits["balance"] as? Int) ?? 0)
+            // `balance` is a decimal string ("221.5890780000"); Int() rejected it
+            // and the balance fell back to 0, showing "0 credits left".
+            if let s = credits["balance"] as? String, let v = Double(s) {
+                creditsBalance = v
+            } else if let n = credits["balance"] as? NSNumber {
+                creditsBalance = n.doubleValue
+            } else {
+                creditsBalance = 0
+            }
             hasCredits = creditsUnlimited || creditsBalance > 0 || ((credits["has_credits"] as? Bool) ?? false)
         } else {
             creditsUnlimited = false
@@ -1571,7 +1578,7 @@ struct UsageView: View {
 
                     Text(usageManager.creditsUnlimited
                          ? "Unlimited credits"
-                         : "\(usageManager.creditsBalance) credits left")
+                         : "\(formatCredits(usageManager.creditsBalance)) credits left, about \(formatUSD(usageManager.creditsBalance * Self.usdPerCredit))")
                         .font(.caption)
                         .foregroundColor(Color.secondaryText)
                 }
@@ -1975,6 +1982,19 @@ struct UsageView: View {
             formatter.dateStyle = .none
             return "at \(formatter.string(from: date))"
         }
+    }
+
+    /// Public pack price: 1,000 credits for $40 (OpenAI, Plus/Pro). Business and
+    /// Enterprise use a rate card, so the money figure is labeled "about".
+    static let usdPerCredit: Double = 40.0 / 1000.0
+
+    func formatUSD(_ value: Double) -> String {
+        String(format: "$%.2f", value)
+    }
+
+    /// Whole balances print as integers, fractional ones with two decimals.
+    func formatCredits(_ value: Double) -> String {
+        value == value.rounded() ? String(Int(value)) : String(format: "%.2f", value)
     }
 
     func colorForPercentage(_ percentage: Double) -> Color {

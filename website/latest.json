@@ -1,7 +1,7 @@
 {
-  "version": "1.1.0",
-  "title": "Light mode fixed",
-  "description": "The app now matches macOS light and dark mode. Choose your look in Settings > Appearance.",
+  "version": "1.1.1",
+  "title": "Credits fixed",
+  "description": "Your Codex credits now show the real balance, with the dollar value next to it.",
   "buttons": [
     {
       "label": "Download",
