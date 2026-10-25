@@ -1,34 +1,12 @@
 {
-  "version": "1.1.1",
-  "title": "Credits fixed",
-  "description": "Your Codex credits now show the real balance, with the dollar value next to it.",
+  "version": "1.1.2",
+  "title": "New time format: \"Resets in 5d 23h\" + pacing",
+  "description": "Reset times now show as a countdown instead of a date, and your limit resets show when they expire. Also new: an optional pace marker to see if you're on track. Prefer the date format? Switch back in Settings > Reset times.",
   "buttons": [
     {
-      "label": "Download",
-      "url": "https://github.com/Artzainnn/CodexUsageBar/releases/latest",
+      "label": "Download latest",
+      "url": "https://github.com/Artzainnn/CodexUsageBar/releases/latest/download/CodexUsageBar-Installer.dmg",
       "style": "primary"
-    },
-    {
-      "label": "Later",
-      "action": "dismiss"
     }
-  ],
-  "message": {
-    "id": "founder-ep1",
-    "heading": "FROM THE FOUNDER",
-    "title": "🎥 Watch the story behind this app",
-    "body": "Behind the scenes of CodexUsageBar, by its founder: the journey of building this app and a few others from Singapore, on camera.",
-    "buttons": [
-      {
-        "label": "Watch on YouTube",
-        "url": "https://codexusagebar.com/founder",
-        "style": "primary"
-      }
-    ],
-    "notify": true,
-    "notification": {
-      "title": "From the founder of CodexUsageBar",
-      "body": "Behind the scenes of this app and my founder journey in Singapore."
-    }
-  }
+  ]
 }
