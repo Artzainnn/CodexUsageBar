@@ -135,7 +135,7 @@ struct UsageBar: View {
 //
 // Solid backing rather than a material: over the popover's own translucent
 // backing a material reads as muddy. Sized to its text, which is safe because
-// the string is bounded — at its longest, "On pace: 100% by now · 6d 23h in"
+// the string is bounded — at its longest, "Under pace: 100% used, 100% expected by now"
 // still sits comfortably inside the bar.
 struct PaceTooltip: View {
     let text: String
@@ -1703,7 +1703,7 @@ struct UsageView: View {
 
                 UsageBar(value: usageManager.sessionPercentage,
                          color: colorForPercentage(usageManager.sessionPercentage),
-                         pace: paceMarker(resetsAt: usageManager.sessionResetsAt, window: TimeInterval(usageManager.sessionWindowSeconds)))
+                         pace: paceMarker(used: usageManager.sessionPercentage, resetsAt: usageManager.sessionResetsAt, window: TimeInterval(usageManager.sessionWindowSeconds)))
 
                 Text("\(Int(usageManager.sessionPercentage * 100))% used")
                     .font(.caption)
@@ -1726,7 +1726,7 @@ struct UsageView: View {
 
                     UsageBar(value: usageManager.weeklyPercentage,
                              color: colorForPercentage(usageManager.weeklyPercentage),
-                             pace: paceMarker(resetsAt: usageManager.weeklyResetsAt, window: TimeInterval(usageManager.weeklyWindowSeconds)))
+                             pace: paceMarker(used: usageManager.weeklyPercentage, resetsAt: usageManager.weeklyResetsAt, window: TimeInterval(usageManager.weeklyWindowSeconds)))
 
                     Text("\(Int(usageManager.weeklyPercentage * 100))% used")
                         .font(.caption)
@@ -1750,7 +1750,7 @@ struct UsageView: View {
 
                     UsageBar(value: Double(limit.percent) / 100.0,
                              color: colorForPercentage(Double(limit.percent) / 100.0),
-                             pace: paceMarker(resetsAt: limit.resetsAt, window: TimeInterval(limit.windowSeconds)))
+                             pace: paceMarker(used: Double(limit.percent) / 100.0, resetsAt: limit.resetsAt, window: TimeInterval(limit.windowSeconds)))
 
                     Text("\(limit.percent)% used")
                         .font(.caption)
@@ -2285,25 +2285,20 @@ struct UsageView: View {
     //
     // The row label already names the window ("Weekly (7 day)"), so the tooltip
     // doesn't repeat it — a longer string overflows the 360pt popup.
-    func paceMarker(resetsAt: Date?, window: TimeInterval) -> PaceMarker? {
+    func paceMarker(used: Double, resetsAt: Date?, window: TimeInterval) -> PaceMarker? {
         guard usageManager.paceMarkerEnabled,
               let pace = Pace(resetsAt: resetsAt, window: window) else { return nil }
-        let percent = Int((pace.expected * 100).rounded())
+        let usedPct = Int((used * 100).rounded())
+        let expectedPct = Int((pace.expected * 100).rounded())
+        // Within 2 points counts as on pace; otherwise say which side of it you are.
+        let status = abs(usedPct - expectedPct) <= 2 ? "On pace"
+            : usedPct > expectedPct ? "Over pace" : "Under pace"
         return PaceMarker(
             expected: pace.expected,
-            tooltip: "On pace: \(percent)% by now · \(formatElapsed(pace.elapsed)) in"
+            tooltip: "\(status): \(usedPct)% used, \(expectedPct)% expected by now"
         )
     }
 
-    func formatElapsed(_ interval: TimeInterval) -> String {
-        let totalMinutes = max(0, Int(interval / 60))
-        let days = totalMinutes / 1440
-        let hours = (totalMinutes % 1440) / 60
-        let minutes = totalMinutes % 60
-        if days > 0 { return "\(days)d \(hours)h" }
-        if hours > 0 { return "\(hours)h \(minutes)m" }
-        return "\(minutes)m"
-    }
 
     func colorForPercentage(_ percentage: Double) -> Color {
         if percentage < 0.7 {
